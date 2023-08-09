@@ -22,14 +22,14 @@ module.exports = (app) => {
     const repoOwner = pr.base.repo.owner.login;
     const repoName = pr.base.repo.name;
 
-    // Fetch review comments for the pull request
+    // Fetch main body for the pull request
     const conversationBody = await context.octokit.pulls.get({
       owner: repoOwner,
       repo: repoName,
       pull_number: pr.number,
     });
 
-    // Check for /execute command in review comments
+    // Check for /execute command in main body
     const conversationBodyHasCommand = conversationBody.data.body.includes("/execute");
 
     // Fetch comments on the pull request
