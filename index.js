@@ -16,7 +16,7 @@ module.exports = (app) => {
   });
 
   // Listen for pull request creation events
-  app.on("pull_request", async (context) => {
+  app.on("pull_request.opened", async (context) => {
     const pr = context.payload.pull_request;
     const repoFullName = context.payload.repository.full_name;
     const repoOwner = pr.base.repo.owner.login;
@@ -30,7 +30,8 @@ module.exports = (app) => {
     });
 
     // Check for /execute command in main body
-    const conversationBodyHasCommand = conversationBody.data.body.includes("/execute");
+    const conversationBodyHasCommand =
+      conversationBody.data.body.includes("/execute");
 
     // Fetch comments on the pull request
     const comments = await context.octokit.issues.listComments({
@@ -55,7 +56,11 @@ module.exports = (app) => {
       commit.commit.message.includes("/execute")
     );
 
-    if (conversationBodyHasCommand || executeComments.length > 0 || executeCommits.length > 0) {
+    if (
+      conversationBodyHasCommand ||
+      executeComments.length > 0 ||
+      executeCommits.length > 0
+    ) {
       // Fetch the code from the pull request
       const response = await context.octokit.pulls.listFiles({
         owner: repoOwner,
@@ -77,20 +82,30 @@ module.exports = (app) => {
             ref: pr.head.ref, // Use the pull request's head ref to get the latest code
           });
 
-          const code = Buffer.from(contentResponse.data.content, 'base64').toString();
-          
-          const response = await axios.post('https://emkc.org/api/v2/piston/execute', {
-            language: 'javascript',
-            version: '1.32.3',
-            aliases: ['deno-js'],
-            runtime: 'deno',
-            files: [
+          const code = Buffer.from(
+            contentResponse.data.content,
+            "base64"
+          ).toString();
+          let response = '';
+          try{
+            response = await axios.post(
+              "https://emkc.org/api/v2/piston/execute",
               {
-                name: file.filename,
-                content: code,
-              },
-            ],
-          });
+                language: "javascript",
+                version: "1.32.3",
+                aliases: ["deno-js"],
+                runtime: "deno",
+                files: [
+                  {
+                    name: file.filename,
+                    content: code,
+                  },
+                ],
+              }
+            );
+          }catch(err){
+            console.log(err);
+          }
           return response.data.run.stdout || response.data.run.stderr;
         })
       );
