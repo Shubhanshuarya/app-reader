@@ -1,4 +1,8 @@
 const { default: axios } = require("axios");
+const supportedLanguages = require("./languages.json");
+
+// Track the timestamp of the last API request
+let lastApiRequestTime = 0;
 
 /**
  * This is the main entrypoint to your Probot app
@@ -18,7 +22,6 @@ module.exports = (app) => {
   // Listen for pull request creation events
   app.on("pull_request.opened", async (context) => {
     const pr = context.payload.pull_request;
-    const repoFullName = context.payload.repository.full_name;
     const repoOwner = pr.base.repo.owner.login;
     const repoName = pr.base.repo.name;
 
@@ -29,21 +32,16 @@ module.exports = (app) => {
       pull_number: pr.number,
     });
 
-    // Check for /execute command in main body
-    const conversationBodyHasCommand =
-      conversationBody.data.body.includes("/execute");
-
-    // Fetch comments on the pull request
-    const comments = await context.octokit.issues.listComments({
-      owner: repoOwner,
-      repo: repoName,
-      issue_number: pr.number,
-    });
-
-    // Check for /execute command in comments
-    const executeComments = comments.data
-      .filter((comment) => comment.body.includes("/execute"))
-      .map((comment) => comment.user.login);
+    // Check for /execute-lang command in main body
+    let conversationBodyHasCommand = false;
+    let lang = ''; // Selected language for execution
+    if (conversationBody.data.body != null) {
+      const commandMatch = conversationBody.data.body.match(/\/execute-(\w+)/);
+      if (commandMatch) {
+        conversationBodyHasCommand = true;
+        lang = commandMatch[1].toLowerCase();
+      }
+    }
 
     // Fetch commits associated with the pull request
     const commits = await context.octokit.pulls.listCommits({
@@ -56,63 +54,74 @@ module.exports = (app) => {
       commit.commit.message.includes("/execute")
     );
 
-    if (
-      conversationBodyHasCommand ||
-      executeComments.length > 0 ||
-      executeCommits.length > 0
-    ) {
-      // Fetch the code from the pull request
+    if (conversationBodyHasCommand || executeCommits.length > 0) {
+      // Check if the selected language is supported
+      const selectedLanguage = supportedLanguages.find(
+        (language) => language.language === "javascript"
+      );
+
+      if (!selectedLanguage) {
+        const unsupportedComment = context.issue({
+          body: `Selected language '${lang}' is not supported.`,
+        });
+        return context.octokit.issues.createComment(unsupportedComment);
+      }
+
+      // Fetch the code files for the selected language
       const response = await context.octokit.pulls.listFiles({
         owner: repoOwner,
         repo: repoName,
         pull_number: pr.number,
       });
 
-      const codeFiles = response.data.filter(
-        (file) => file.filename.endsWith(".js") // Assuming JavaScript files for demonstration
+      const codeFiles = response.data.filter((file) =>
+        file.filename.endsWith(`.${lang}`)
       );
 
-      // Execute code using the emkc.org API
-      const executionResults = await Promise.all(
-        codeFiles.map(async (file) => {
-          const contentResponse = await context.octokit.repos.getContent({
-            owner: repoOwner,
-            repo: repoName,
-            path: file.filename,
-            ref: pr.head.ref, // Use the pull request's head ref to get the latest code
-          });
+      // Execute code using the emkc.org API for each file
+      const executionResults = [];
 
-          const code = Buffer.from(
-            contentResponse.data.content,
-            "base64"
-          ).toString();
-          let response = '';
-          try{
-            response = await axios.post(
-              "https://emkc.org/api/v2/piston/execute",
-              {
-                language: "javascript",
-                version: "1.32.3",
-                aliases: ["deno-js"],
-                runtime: "deno",
-                files: [
-                  {
-                    name: file.filename,
-                    content: code,
-                  },
-                ],
-              }
-            );
-          }catch(err){
-            console.log(err);
-          }
-          return response.data.run.stdout || response.data.run.stderr;
-        })
-      );
+      for (const file of codeFiles) {
+        // Handle rate limiting
+        await handleRateLimit();
+
+        const contentResponse = await context.octokit.repos.getContent({
+          owner: repoOwner,
+          repo: repoName,
+          path: file.filename,
+          ref: pr.head.ref,
+        });
+
+        const code = Buffer.from(
+          contentResponse.data.content,
+          "base64"
+        ).toString();
+
+        try {
+          const response = await axios.post(
+            "https://emkc.org/api/v2/piston/execute",
+            {
+              language: selectedLanguage.language,
+              version: selectedLanguage.version,
+              aliases: selectedLanguage.aliases,
+              runtime: selectedLanguage.runtime,
+              files: [
+                {
+                  name: file.filename,
+                  content: code,
+                },
+              ],
+            }
+          );
+          executionResults.push(response.data.run.stdout || response.data.run.stderr || "");
+        } catch (err) {
+          console.log(err);
+        }
+      }
 
       // Post the execution results as a comment on the pull request
       const resultsComment = context.issue({
-        body: "Execution Results:\n\n" + executionResults.join("\n\n"),
+        body: `Execution Results (${selectedLanguage.language}):\n\n${executionResults.join("\n\n")}`,
       });
 
       return context.octokit.issues.createComment(resultsComment);
@@ -125,3 +134,13 @@ module.exports = (app) => {
   // To get your app running against GitHub, see:
   // https://probot.github.io/docs/development/
 };
+
+async function handleRateLimit() {
+  const now = Date.now();
+  const timeSinceLastRequest = now - lastApiRequestTime;
+  if (timeSinceLastRequest < 200) {
+    // Wait for the remaining time before making the next request
+    await new Promise((resolve) => setTimeout(resolve, 200 - timeSinceLastRequest));
+  }
+  lastApiRequestTime = Date.now();
+}
